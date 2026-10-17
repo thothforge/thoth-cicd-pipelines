@@ -1,0 +1,31 @@
+# Example consumer workflow. Copy into a project's .github/workflows/ and adjust
+# the account ids. It calls the ORG-shared reusable IaC pipeline.
+name: deploy-iac
+
+on:
+  push:
+    branches: [main, master]
+    paths: ["stacks/**", "modules/**", "environments/**", "common/**", "root.hcl"]
+  pull_request:
+    paths: ["stacks/**", "modules/**", "environments/**", "common/**", "root.hcl"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, qa, prd]
+        default: dev
+
+permissions:
+  contents: read
+
+jobs:
+  iac:
+    uses: thothforge/fullstack-cicd-pipelines-gha/.github/workflows/iac-pipeline.yml@v1
+    with:
+      environment: ${{ inputs.environment || 'dev' }}
+      hub_account_id: "225311078840"
+      deploy_account_id: "225311078840"
+      region: us-east-2
+      pac_enforcement: soft
+      pipelines_ref: v1
+      do_apply: ${{ github.event_name != 'pull_request' }}

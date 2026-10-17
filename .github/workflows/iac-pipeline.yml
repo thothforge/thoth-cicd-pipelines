@@ -1,0 +1,178 @@
+name: iac-pipeline (reusable)
+
+# Transversal, ORG-shared reusable IaC pipeline for Terragrunt/OpenTofu,
+# ThothCTL-governed. Ported from the Azure DevOps IaC templates
+# (fullstack-cicd-pipelines-azdo) to the CodeBuild-hosted GitHub Actions
+# runner / hub-spoke model. Projects call this via:
+#
+#   jobs:
+#     iac:
+#       uses: thothforge/fullstack-cicd-pipelines-gha/.github/workflows/iac-pipeline.yml@v1
+#       with: { ... }
+#
+# Canonical flow (devsecops phases):
+#   plan -> test(tfplan) -> cost -> blast-radius -> secure(checkov,opa) -> [apply]
+#
+# Runner tools (tofu, terragrunt, thothctl, checkov, ...) are PREINSTALLED in the
+# shared DevSecOps IaC CodeBuild image — this workflow installs NOTHING.
+#
+# Credential model (no OIDC): the job runs as the ambient CodeBuild service role;
+# it chain-assumes the per-account spoke roles into the deployment_profile.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: TF_WORKSPACE / environment (dev|qa|prd)
+        type: string
+        required: true
+      deploy_account_id:
+        description: Target spoke account id for this environment
+        type: string
+        required: true
+      hub_account_id:
+        description: DevSecOps hub account id (owns the runner service roles)
+        type: string
+        required: true
+      runner_project:
+        description: CodeBuild deploy-runner project name (the runs-on label suffix)
+        type: string
+        required: false
+        default: github-actions-deploy-runner
+      region:
+        description: AWS region
+        type: string
+        required: false
+        default: us-east-2
+      spoke_read_role:
+        description: Full ARN override for the read (plan) spoke role; empty = computed from convention
+        type: string
+        required: false
+        default: ""
+      spoke_deploy_role:
+        description: Full ARN override for the deploy (apply) spoke role; empty = computed from convention
+        type: string
+        required: false
+        default: ""
+      pipelines_ref:
+        description: Git ref of this pipelines repo for the composite action (match the @ref you called with)
+        type: string
+        required: false
+        default: main
+      pac_enforcement:
+        description: OPA policy enforcement (soft|hard)
+        type: string
+        required: false
+        default: soft
+      do_apply:
+        description: Run apply after a successful plan+scan (false = plan/scan only)
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  iac:
+    # Routed to the shared DEPLOY CodeBuild runner (Option C, ORG-scoped).
+    runs-on:
+      - codebuild-${{ inputs.runner_project }}-${{ github.run_id }}-${{ github.run_attempt }}
+    env:
+      TF_WORKSPACE: ${{ inputs.environment }}
+      AWS_REGION: ${{ inputs.region }}
+      # Path-based spoke role ARNs (ref ecs-agents convention):
+      #   /pipeline/read/hub-<hub>-read-<spoke>  and  /pipeline/deploy/hub-<hub>-deploy-<spoke>
+      READ_ROLE_ARN: ${{ inputs.spoke_read_role != '' && inputs.spoke_read_role || format('arn:aws:iam::{0}:role/pipeline/read/hub-{1}-read-{0}', inputs.deploy_account_id, inputs.hub_account_id) }}
+      DEPLOY_ROLE_ARN: ${{ inputs.spoke_deploy_role != '' && inputs.spoke_deploy_role || format('arn:aws:iam::{0}:role/pipeline/deploy/hub-{1}-deploy-{0}', inputs.deploy_account_id, inputs.hub_account_id) }}
+      COLUMNS: "200"
+      FORCE_COLOR: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v5
+
+      # The composite action lives in THIS pipelines repo. A './' path would
+      # resolve against the CALLER repo (GitHub limitation), so it is checked out
+      # explicitly and referenced by local path under a subfolder.
+      - name: Checkout pipelines repo (for composite actions)
+        uses: actions/checkout@v5
+        with:
+          repository: thothforge/fullstack-cicd-pipelines-gha
+          ref: ${{ inputs.pipelines_ref }}
+          path: .cicd-pipelines
+
+      - name: Tool versions (from the baked image)
+        shell: bash
+        run: |
+          set -e
+          tofu --version
+          terragrunt --version
+          thothctl --version
+          aws --version
+
+      # --- PLAN credentials: assume the read (plan) spoke role ---
+      - name: Assume read role (plan)
+        uses: ./.cicd-pipelines/.github/actions/assume-spoke-role
+        with:
+          role_arn: ${{ env.READ_ROLE_ARN }}
+          profile_name: deployment_profile
+          role_session_name: gha-${{ inputs.environment }}-plan
+          region: ${{ inputs.region }}
+
+      - name: Plan
+        shell: bash
+        env:
+          TG_TF_PATH: tofu
+        run: terragrunt run --all plan --non-interactive --out-dir tfplan --json-out-dir tfplan
+
+      # --- ThothCTL governance on the plan (test -> cost -> blast-radius) ---
+      - name: Plan summary (thothctl tfplan)
+        shell: bash
+        run: thothctl -d tfplan check iac -type tfplan --outmd plan-summary.md --recursive --tftool tofu
+
+      - name: Cost analysis
+        shell: bash
+        run: thothctl -d tfplan check iac -type cost-analysis --recursive || true
+
+      - name: Blast radius
+        shell: bash
+        run: thothctl -d tfplan check iac -type blast-radius --recursive --plan-file tfplan.json || true
+
+      # --- SECURE: SAST + policy-as-code gates ---
+      - name: SAST (checkov)
+        shell: bash
+        run: thothctl -d tfplan scan iac -t checkov --max-workers 4 --html-reports-format simple
+
+      - name: Policy as Code (OPA)
+        shell: bash
+        run: thothctl -d tfplan scan iac -t opa --enforcement ${{ inputs.pac_enforcement }} --output sarif --html-reports-format simple
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iac-reports-${{ inputs.environment }}
+          path: |
+            **/plan-summary.md
+            **/Reports/**
+            **/*.sarif
+          if-no-files-found: ignore
+
+      # --- APPLY: re-assume the deploy (write) spoke role, then apply ---
+      - name: Assume deploy role (apply)
+        if: ${{ inputs.do_apply }}
+        uses: ./.cicd-pipelines/.github/actions/assume-spoke-role
+        with:
+          role_arn: ${{ env.DEPLOY_ROLE_ARN }}
+          profile_name: deployment_profile
+          role_session_name: gha-${{ inputs.environment }}-apply
+          region: ${{ inputs.region }}
+          duration_seconds: "7200"
+
+      - name: Apply
+        if: ${{ inputs.do_apply }}
+        shell: bash
+        env:
+          TG_TF_PATH: tofu
+        run: terragrunt run --all apply --non-interactive

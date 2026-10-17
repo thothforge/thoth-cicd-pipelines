@@ -1,0 +1,63 @@
+name: Assume spoke role into a named AWS profile
+description: >
+  Chain-assume a hub-spoke IAM role from the ambient CodeBuild service-role
+  identity and write the temporary credentials to a named AWS CLI profile that
+  Terragrunt/OpenTofu reference. Port of the Azure DevOps configure_aws_credentials
+  template to the CodeBuild-hosted GitHub Actions runner model (NO OIDC hop — the
+  runner already runs as the CodeBuild service role inside the hub account).
+
+inputs:
+  role_arn:
+    description: >
+      Full ARN of the spoke role to assume, e.g.
+      arn:aws:iam::<spoke>:role/pipeline/read/hub-<hub>-read-<spoke> (plan) or
+      .../pipeline/deploy/hub-<hub>-deploy-<spoke> (apply).
+    required: true
+  profile_name:
+    description: Named AWS CLI profile to write the temporary credentials into (e.g. deployment_profile, backend_profile).
+    required: true
+  role_session_name:
+    description: STS session name (shows in CloudTrail). Keep it attributable.
+    required: false
+    default: gha-iac
+  region:
+    description: AWS region.
+    required: false
+    default: us-east-2
+  duration_seconds:
+    description: Requested STS session duration.
+    required: false
+    default: "3600"
+
+runs:
+  using: composite
+  steps:
+    - name: Assume ${{ inputs.profile_name }} (${{ inputs.role_arn }})
+      shell: bash
+      env:
+        ROLE_ARN: ${{ inputs.role_arn }}
+        PROFILE_NAME: ${{ inputs.profile_name }}
+        ROLE_SESSION_NAME: ${{ inputs.role_session_name }}
+        AWS_REGION: ${{ inputs.region }}
+        DURATION: ${{ inputs.duration_seconds }}
+      run: |
+        set -euo pipefail
+
+        echo "[info] Ambient (CodeBuild service role) identity:"
+        aws sts get-caller-identity --output json
+
+        echo "[info] Assuming: ${ROLE_ARN}"
+        creds="$(aws sts assume-role \
+          --role-arn "${ROLE_ARN}" \
+          --role-session-name "${ROLE_SESSION_NAME}-$(date +%s)" \
+          --duration-seconds "${DURATION}" \
+          --output json)"
+
+        aws configure set aws_access_key_id     "$(echo "$creds" | jq -r '.Credentials.AccessKeyId')"     --profile "${PROFILE_NAME}"
+        aws configure set aws_secret_access_key "$(echo "$creds" | jq -r '.Credentials.SecretAccessKey')" --profile "${PROFILE_NAME}"
+        aws configure set aws_session_token     "$(echo "$creds" | jq -r '.Credentials.SessionToken')"    --profile "${PROFILE_NAME}"
+        aws configure set region                "${AWS_REGION}"                                           --profile "${PROFILE_NAME}"
+
+        echo "[info] Profile '${PROFILE_NAME}' identity:"
+        aws sts get-caller-identity --profile "${PROFILE_NAME}" --output json
+        echo "[ok] Wrote temporary credentials to profile '${PROFILE_NAME}'."

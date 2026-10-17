@@ -221,7 +221,10 @@ jobs:
           profile_name: deployment_profile
           role_session_name: gha-${{ inputs.environment }}-apply
           region: ${{ inputs.region }}
-          duration_seconds: "7200"
+          # 3600 max: this is a role-chaining assume (from the already-assumed
+          # CodeBuild service role), which AWS hard-caps at 1h regardless of the
+          # target role's MaxSessionDuration. Requesting more -> ValidationError.
+          duration_seconds: "3600"
 
       - name: Apply
         if: ${{ inputs.do_apply }}

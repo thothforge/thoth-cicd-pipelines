@@ -1,23 +1,32 @@
-# fullstack-cicd-pipelines-gha
+# thoth-cicd-pipelines
 
 Transversal, organization-shared **GitHub Actions reusable workflows and composite
-actions** for the `thothforge` DevSecOps platform — the GitHub Actions counterpart of
-the Azure DevOps `fullstack-cicd-pipelines-azdo` templates.
+actions** for the [Thoth framework](https://thothctl.readthedocs.io/en/latest/) —
+the GitHub Actions counterpart of the Azure DevOps `fullstack-cicd-pipelines-azdo`
+templates, governed by **ThothCTL**.
 
 Projects **reuse** these centrally instead of copying pipeline logic. Public so every
 `thothforge` repo (and the community) can consume them.
+
+## Scope
+
+**IaC first.** This repo currently ships the **Infrastructure-as-Code** pipeline
+(Terragrunt/OpenTofu, ThothCTL-governed). Application and other pipeline types will be
+added later under their own paths — the layout is intentionally namespaced so they can
+coexist (e.g. `iac-pipeline.yml`, future `app-*.yml`).
 
 ## What's here
 
 | Path | Purpose |
 |------|---------|
-| `.github/workflows/iac-pipeline.yml` | Reusable IaC pipeline (Terragrunt/OpenTofu, ThothCTL-governed): plan → tfplan summary → cost → blast-radius → checkov → OPA → optional apply. |
-| `.github/actions/assume-spoke-role/` | Composite action: chain-assume a hub-spoke IAM role into a named AWS CLI profile (no OIDC; runs under the ambient CodeBuild service role). |
+| `.github/workflows/iac-pipeline.yml` | Reusable IaC pipeline: plan → tfplan summary → cost → blast-radius → checkov → OPA → optional apply. All via ThothCTL. |
+| `.github/actions/assume-spoke-role/` | Composite action: chain-assume a hub-spoke IAM role into a named AWS CLI profile (no OIDC; ambient CodeBuild service role). |
+| `examples/` | Copy-paste consumer workflows. |
 
 ## Execution model
 
-- Runs on **CodeBuild-hosted GitHub Actions runners** (Option C: one ORG-scoped BUILD
-  runner + one DEPLOY runner in the DevSecOps hub account).
+- Runs on **CodeBuild-hosted GitHub Actions runners** (Thoth "Option C": one ORG-scoped
+  BUILD runner + one DEPLOY runner in the DevSecOps hub account).
 - Runner tools (`tofu`, `terragrunt`, `thothctl`, `checkov`, `aws`) are **preinstalled**
   in the shared DevSecOps IaC CodeBuild image — the workflow installs nothing.
 - **Hub-spoke credentials, no OIDC:** the job runs as the ambient CodeBuild service role
@@ -42,7 +51,7 @@ permissions:
 
 jobs:
   iac:
-    uses: thothforge/fullstack-cicd-pipelines-gha/.github/workflows/iac-pipeline.yml@v1
+    uses: thothforge/thoth-cicd-pipelines/.github/workflows/iac-pipeline.yml@v1
     with:
       environment: ${{ inputs.environment || 'dev' }}
       hub_account_id: "225311078840"

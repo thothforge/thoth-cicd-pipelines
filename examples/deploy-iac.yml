@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   iac:
-    uses: thothforge/fullstack-cicd-pipelines-gha/.github/workflows/iac-pipeline.yml@v1
+    uses: thothforge/thoth-cicd-pipelines/.github/workflows/iac-pipeline.yml@v1
     with:
       environment: ${{ inputs.environment || 'dev' }}
       hub_account_id: "225311078840"

@@ -7,7 +7,7 @@ name: iac-pipeline (reusable)
 #
 #   jobs:
 #     iac:
-#       uses: thothforge/fullstack-cicd-pipelines-gha/.github/workflows/iac-pipeline.yml@v1
+#       uses: thothforge/thoth-cicd-pipelines/.github/workflows/iac-pipeline.yml@v1
 #       with: { ... }
 #
 # Canonical flow (devsecops phases):
@@ -98,7 +98,7 @@ jobs:
       - name: Checkout pipelines repo (for composite actions)
         uses: actions/checkout@v5
         with:
-          repository: thothforge/fullstack-cicd-pipelines-gha
+          repository: thothforge/thoth-cicd-pipelines
           ref: ${{ inputs.pipelines_ref }}
           path: .cicd-pipelines
 

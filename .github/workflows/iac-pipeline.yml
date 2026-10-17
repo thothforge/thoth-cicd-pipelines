@@ -85,6 +85,11 @@ jobs:
       #   /pipeline/read/hub-<hub>-read-<spoke>  and  /pipeline/deploy/hub-<hub>-deploy-<spoke>
       READ_ROLE_ARN: ${{ inputs.spoke_read_role != '' && inputs.spoke_read_role || format('arn:aws:iam::{0}:role/pipeline/read/hub-{1}-read-{0}', inputs.deploy_account_id, inputs.hub_account_id) }}
       DEPLOY_ROLE_ARN: ${{ inputs.spoke_deploy_role != '' && inputs.spoke_deploy_role || format('arn:aws:iam::{0}:role/pipeline/deploy/hub-{1}-deploy-{0}', inputs.deploy_account_id, inputs.hub_account_id) }}
+      # Terragrunt backend reads BACKEND_PROFILE (common.hcl get_env). The remote
+      # state bucket lives in the hub account, reachable by the runner's ambient
+      # CodeBuild service role — so the backend uses a dedicated named profile we
+      # populate from the ambient identity (no assume needed).
+      BACKEND_PROFILE: backend_profile
       COLUMNS: "200"
       FORCE_COLOR: "1"
       PYTHONUNBUFFERED: "1"
@@ -119,6 +124,54 @@ jobs:
           profile_name: deployment_profile
           role_session_name: gha-${{ inputs.environment }}-plan
           region: ${{ inputs.region }}
+
+      # --- Backend profile + provider profile override ---
+      # Terragrunt's generated provider reads var.profile[workspace].profile and
+      # the backend reads BACKEND_PROFILE. Neither "gft-devsecops" nor the
+      # assumed profiles exist by those names on the runner, so:
+      #   1) create a named "backend_profile" from the ambient service-role creds
+      #      (state bucket is in the hub account the runner already runs in),
+      #   2) write overwrite.auto.tfvars remapping the provider profile map to the
+      #      assumed "deployment_profile" (root.hcl loads this file first).
+      - name: Configure backend profile + overwrite.auto.tfvars
+        shell: bash
+        env:
+          AWS_REGION: ${{ inputs.region }}
+          TF_WORKSPACE: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+
+          # 1) backend_profile ← ambient CodeBuild service-role credentials.
+          #    CodeBuild exposes them via the ECS container-credentials endpoint;
+          #    materialize them into a static named profile that `tofu init`
+          #    (backend) can read. The state bucket is in the hub account the
+          #    runner already runs in, so no role assumption is needed here.
+          if [ -n "${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:-}" ]; then
+            c="$(curl -sf "http://169.254.170.2${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}")"
+          elif [ -n "${AWS_CONTAINER_CREDENTIALS_FULL_URI:-}" ]; then
+            c="$(curl -sf -H "Authorization: ${AWS_CONTAINER_AUTHORIZATION_TOKEN:-}" "${AWS_CONTAINER_CREDENTIALS_FULL_URI}")"
+          else
+            echo "::error::No container credentials endpoint found; cannot build backend_profile"; exit 1
+          fi
+          aws configure set aws_access_key_id     "$(echo "$c" | jq -r .AccessKeyId)"     --profile backend_profile
+          aws configure set aws_secret_access_key "$(echo "$c" | jq -r .SecretAccessKey)" --profile backend_profile
+          aws configure set aws_session_token     "$(echo "$c" | jq -r .Token)"           --profile backend_profile
+          aws configure set region "${AWS_REGION}" --profile backend_profile
+          echo "[info] backend_profile identity:"
+          aws sts get-caller-identity --profile backend_profile --output json
+
+          # 2) Provider profile override consumed by root.hcl (loaded first as an
+          #    optional var-file). Points this workspace at the assumed deploy creds.
+          cat > overwrite.auto.tfvars <<EOF
+          profile = {
+            "${TF_WORKSPACE}" = {
+              profile = "deployment_profile"
+              region  = "${AWS_REGION}"
+            }
+          }
+          EOF
+          echo "[info] overwrite.auto.tfvars:"
+          cat overwrite.auto.tfvars
 
       - name: Plan
         shell: bash

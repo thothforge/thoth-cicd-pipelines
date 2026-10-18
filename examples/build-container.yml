@@ -1,0 +1,41 @@
+# Example consumer workflow. Copy into a project's .github/workflows/ and adjust
+# the image/context/account ids. It calls the ORG-shared reusable container
+# pipeline, which builds and pushes to ECR on the BUILD runner (Option C).
+name: build-container
+
+on:
+  push:
+    branches: [main, master]
+    paths: ["**/Dockerfile", "**/*.py", "**/requirements.txt"]
+  pull_request:
+    paths: ["**/Dockerfile", "**/*.py", "**/requirements.txt"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Example 1 — a service image to the hub ECR (same-account; ambient build role).
+  petservice:
+    uses: thothforge/thoth-cicd-pipelines/.github/workflows/container-pipeline.yml@v1
+    with:
+      image_name: petadoptions/petservice
+      context: workshop/eks-app/services/petservice
+      ecr_account_id: "804450215614"
+      hub_account_id: "804450215614"
+      region: us-east-2
+      push: ${{ github.event_name != 'pull_request' }}
+      pipelines_ref: v1
+
+  # Example 2 — the MCP server image (Bedrock AgentCore requires linux/arm64).
+  mcp-server:
+    uses: thothforge/thoth-cicd-pipelines/.github/workflows/container-pipeline.yml@v1
+    with:
+      image_name: gft-se-devops-agent-mcp/mcp-server
+      context: workshop/gft-se-devops-agent-mcp/src/mcp-server
+      platforms: linux/arm64
+      ecr_account_id: "804450215614"
+      hub_account_id: "804450215614"
+      region: us-east-2
+      push: ${{ github.event_name != 'pull_request' }}
+      pipelines_ref: v1

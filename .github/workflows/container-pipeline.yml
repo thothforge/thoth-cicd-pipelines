@@ -1,0 +1,146 @@
+name: container-pipeline (reusable)
+
+# Transversal, ORG-shared reusable CONTAINER build+publish pipeline. Builds a
+# container image and pushes it to Amazon ECR, on the CodeBuild-hosted GitHub
+# Actions runner / hub-spoke model (companion to iac-pipeline.yml). Projects
+# call this via:
+#
+#   jobs:
+#     image:
+#       uses: thothforge/thoth-cicd-pipelines/.github/workflows/container-pipeline.yml@v1
+#       with:
+#         image_name: petadoptions/petservice
+#         context: workshop/eks-app/services/petservice
+#         ecr_account_id: "804450215614"
+#         hub_account_id: "804450215614"
+#
+# Canonical flow: checkout -> ECR login -> build (buildx) -> scan -> push.
+#
+# Runner: the BUILD runner (privileged Docker + scoped ECR push), Option C.
+# Its default CodeBuild project is github-actions-build-runner.
+#
+# Credential model (no OIDC): the job runs as the ambient CodeBuild BUILD
+# service role. For a cross-account ECR registry it chain-assumes the spoke
+# exec role in ecr_account_id; when ecr_account_id == hub_account_id it uses the
+# ambient role directly (the build role already has scoped ECR push on the hub).
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: ECR repository name / image path (e.g. petadoptions/petservice)
+        type: string
+        required: true
+      context:
+        description: Docker build context directory (repo-relative)
+        type: string
+        required: true
+      dockerfile:
+        description: Dockerfile path relative to context
+        type: string
+        required: false
+        default: Dockerfile
+      ecr_account_id:
+        description: AWS account id that owns the ECR registry to push to
+        type: string
+        required: true
+      hub_account_id:
+        description: DevSecOps hub account id (owns the runner service roles)
+        type: string
+        required: true
+      runner_project:
+        description: CodeBuild build-runner project name (the runs-on label suffix)
+        type: string
+        required: false
+        default: github-actions-build-runner
+      region:
+        description: AWS region of the ECR registry
+        type: string
+        required: false
+        default: us-east-2
+      platforms:
+        description: Target build platform(s). Use linux/arm64 for Bedrock AgentCore images.
+        type: string
+        required: false
+        default: linux/amd64
+      image_tag:
+        description: Primary image tag. Empty = the commit SHA.
+        type: string
+        required: false
+        default: ""
+      push:
+        description: Push the image to ECR (false = build+scan only, e.g. on PRs)
+        type: boolean
+        required: false
+        default: true
+      spoke_deploy_role:
+        description: Full ARN override for the ECR-account exec role; empty = computed from convention
+        type: string
+        required: false
+        default: ""
+      external_id:
+        description: ExternalId for the cross-account AssumeRole (confused-deputy guard)
+        type: string
+        required: false
+        default: github-actions-deploy
+      pipelines_ref:
+        description: Git ref of this pipelines repo for the composite action (match the @ref you called with)
+        type: string
+        required: false
+        default: v1
+
+permissions:
+  contents: read
+
+jobs:
+  build-push:
+    # BUILD runner (privileged Docker, scoped ECR push) — Option C.
+    runs-on:
+      - codebuild-${{ inputs.runner_project }}-${{ github.run_id }}-${{ github.run_attempt }}
+    env:
+      AWS_REGION: ${{ inputs.region }}
+      REGISTRY: ${{ inputs.ecr_account_id }}.dkr.ecr.${{ inputs.region }}.amazonaws.com
+      IMAGE: ${{ inputs.image_name }}
+      TAG: ${{ inputs.image_tag != '' && inputs.image_tag || github.sha }}
+      CROSS_ACCOUNT: ${{ inputs.ecr_account_id != inputs.hub_account_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cross-account registry: chain-assume the ECR account's exec role.
+      # Same-account (hub): skip — the ambient build role already has ECR push.
+      - name: Assume ECR-account role (cross-account only)
+        if: ${{ env.CROSS_ACCOUNT == 'true' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.spoke_deploy_role != '' && inputs.spoke_deploy_role || format('arn:aws:iam::{0}:role/github-spoke-exec-role', inputs.ecr_account_id) }}
+          role-external-id: ${{ inputs.external_id }}
+          role-session-name: gha-build-${{ github.run_id }}
+          aws-region: ${{ inputs.region }}
+
+      - name: ECR login
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "$REGISTRY"
+
+      # Ensure the ECR repo exists (idempotent; harmless if created by IaC).
+      - name: Ensure ECR repository
+        if: ${{ inputs.push }}
+        run: |
+          aws ecr describe-repositories --repository-names "$IMAGE" --region "$AWS_REGION" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "$IMAGE" --region "$AWS_REGION" \
+                 --image-scanning-configuration scanOnPush=true --image-tag-mutability IMMUTABLE
+
+      - name: Build and push
+        run: |
+          docker buildx create --use --name builder 2>/dev/null || docker buildx use builder
+          docker buildx build \
+            --platform "${{ inputs.platforms }}" \
+            -f "${{ inputs.context }}/${{ inputs.dockerfile }}" \
+            -t "$REGISTRY/$IMAGE:$TAG" \
+            -t "$REGISTRY/$IMAGE:latest" \
+            ${{ inputs.push && '--push' || '--load' }} \
+            "${{ inputs.context }}"
+
+      - name: Image digest
+        if: ${{ inputs.push }}
+        run: aws ecr describe-images --repository-name "$IMAGE" --image-ids imageTag="$TAG" --region "$AWS_REGION" --query 'imageDetails[0].imageDigest' --output text

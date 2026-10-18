@@ -20,8 +20,9 @@ coexist (e.g. `iac-pipeline.yml`, future `app-*.yml`).
 | Path | Purpose |
 |------|---------|
 | `.github/workflows/iac-pipeline.yml` | Reusable IaC pipeline: plan → tfplan summary → cost → blast-radius → checkov → OPA → optional apply. All via ThothCTL. |
+| `.github/workflows/container-pipeline.yml` | Reusable container pipeline: checkout → ECR login → buildx build → scan → push. Runs on the BUILD runner (privileged Docker + scoped ECR push); cross-account ECR via spoke-role assume. |
 | `.github/actions/assume-spoke-role/` | Composite action: chain-assume a hub-spoke IAM role into a named AWS CLI profile (no OIDC; ambient CodeBuild service role). |
-| `examples/` | Copy-paste consumer workflows. |
+| `examples/` | Copy-paste consumer workflows (`deploy-iac.yml`, `build-container.yml`). |
 
 ## Execution model
 

@@ -122,13 +122,17 @@ jobs:
           aws ecr get-login-password --region "$AWS_REGION" \
             | docker login --username AWS --password-stdin "$REGISTRY"
 
-      # Ensure the ECR repo exists (idempotent; harmless if created by IaC).
-      - name: Ensure ECR repository
+      # The ECR repo is created declaratively at team onboarding by the ACK ECR
+      # controller (ecr.services.k8s.aws/Repository in platform/teams/<team>/),
+      # NOT by this pipeline. We only verify it exists and fail early with a
+      # clear message if onboarding hasn't created it yet.
+      - name: Verify ECR repository exists (owned by ACK / team onboarding)
         if: ${{ inputs.push }}
         run: |
-          aws ecr describe-repositories --repository-names "$IMAGE" --region "$AWS_REGION" >/dev/null 2>&1 \
-            || aws ecr create-repository --repository-name "$IMAGE" --region "$AWS_REGION" \
-                 --image-scanning-configuration scanOnPush=true --image-tag-mutability IMMUTABLE
+          if ! aws ecr describe-repositories --repository-names "$IMAGE" --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "::error::ECR repo '$IMAGE' not found. It is created at team onboarding via the ACK ECR controller (add it to platform/teams/<team>/argoproject-values.yaml ecrRepositories). This pipeline does not create ECR repos."
+            exit 1
+          fi
 
       - name: Build and push
         run: |

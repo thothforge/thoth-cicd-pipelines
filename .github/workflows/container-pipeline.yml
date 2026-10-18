@@ -64,7 +64,16 @@ on:
         required: false
         default: linux/amd64
       image_tag:
-        description: Primary image tag. Empty = the commit SHA.
+        description: Primary (immutable) image tag. Empty = the commit SHA.
+        type: string
+        required: false
+        default: ""
+      additional_tags:
+        description: >
+          Optional extra tags to also push, space-separated (e.g. a branch name
+          or a release tag). AVOID mutable tags like 'latest' on IMMUTABLE ECR
+          repos — a second build can't overwrite them and will fail. Empty =
+          push only the immutable primary tag.
         type: string
         required: false
         default: ""
@@ -88,6 +97,16 @@ on:
         type: string
         required: false
         default: v1
+    outputs:
+      image_tag:
+        description: The immutable tag pushed (commit SHA unless image_tag was set).
+        value: ${{ jobs.build-push.outputs.image_tag }}
+      image_digest:
+        description: The ECR image digest of the pushed image.
+        value: ${{ jobs.build-push.outputs.image_digest }}
+      image_ref:
+        description: Fully-qualified image reference registry/image@digest.
+        value: ${{ jobs.build-push.outputs.image_ref }}
 
 permissions:
   contents: read
@@ -97,6 +116,10 @@ jobs:
     # BUILD runner (privileged Docker, scoped ECR push) — Option C.
     runs-on:
       - codebuild-${{ inputs.runner_project }}-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+      image_digest: ${{ steps.digest.outputs.digest }}
+      image_ref: ${{ steps.digest.outputs.ref }}
     env:
       AWS_REGION: ${{ inputs.region }}
       REGISTRY: ${{ inputs.ecr_account_id }}.dkr.ecr.${{ inputs.region }}.amazonaws.com
@@ -135,16 +158,30 @@ jobs:
           fi
 
       - name: Build and push
+        id: meta
         run: |
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # Build the tag args: always the immutable primary tag; add any
+          # explicit additional_tags (NOT 'latest' on IMMUTABLE repos).
+          tag_args=(-t "$REGISTRY/$IMAGE:$TAG")
+          for t in ${{ inputs.additional_tags }}; do
+            tag_args+=(-t "$REGISTRY/$IMAGE:$t")
+          done
           docker buildx create --use --name builder 2>/dev/null || docker buildx use builder
           docker buildx build \
             --platform "${{ inputs.platforms }}" \
             -f "${{ inputs.context }}/${{ inputs.dockerfile }}" \
-            -t "$REGISTRY/$IMAGE:$TAG" \
-            -t "$REGISTRY/$IMAGE:latest" \
+            "${tag_args[@]}" \
             ${{ inputs.push && '--push' || '--load' }} \
             "${{ inputs.context }}"
 
       - name: Image digest
+        id: digest
         if: ${{ inputs.push }}
-        run: aws ecr describe-images --repository-name "$IMAGE" --image-ids imageTag="$TAG" --region "$AWS_REGION" --query 'imageDetails[0].imageDigest' --output text
+        run: |
+          digest=$(aws ecr describe-images --repository-name "$IMAGE" \
+            --image-ids imageTag="$TAG" --region "$AWS_REGION" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "ref=$REGISTRY/$IMAGE@$digest" >> "$GITHUB_OUTPUT"
+          echo "Pushed $REGISTRY/$IMAGE:$TAG ($digest)"
